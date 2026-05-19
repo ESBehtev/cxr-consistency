@@ -227,3 +227,11 @@ experiments/
 logs/
 
 wandb/
+
+mlruns/
+mlflow.db
+mlflow.db-shm
+mlflow.db-wal
+
+.DS_Store
+*.db
