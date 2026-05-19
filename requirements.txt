@@ -1,0 +1,17 @@
+torch
+torchvision
+transformers
+datasets
+pandas
+numpy
+scikit-learn
+tqdm
+Pillow
+opencv-python
+matplotlib
+seaborn
+pyyaml
+sentencepiece
+accelerate
+wandb
+kaggle

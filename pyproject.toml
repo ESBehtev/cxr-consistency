@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cxr_consistency"
+version = "0.1.0"
+description = "Chest X-ray and report consistency checking"
+authors = [
+    {name = "Edvard"}
+]
+requires-python = ">=3.10"
