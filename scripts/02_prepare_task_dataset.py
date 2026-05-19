@@ -122,28 +122,27 @@ def resolve_image_paths(df: pd.DataFrame, image_index: dict) -> pd.DataFrame:
 
 
 def make_splits(df: pd.DataFrame) -> pd.DataFrame:
-    train_df, temp_df = train_test_split(
-        df,
+    patients = df["subject_id"].drop_duplicates()
+
+    train_patients, temp_patients = train_test_split(
+        patients,
         test_size=0.2,
         random_state=42,
-        stratify=df["view"],
     )
 
-    valid_df, test_df = train_test_split(
-        temp_df,
+    valid_patients, test_patients = train_test_split(
+        temp_patients,
         test_size=0.5,
         random_state=42,
-        stratify=temp_df["view"],
     )
 
-    train_df["split"] = "train"
-    valid_df["split"] = "valid"
-    test_df["split"] = "test"
+    df["split"] = "none"
 
-    return pd.concat(
-        [train_df, valid_df, test_df],
-        ignore_index=True,
-    )
+    df.loc[df["subject_id"].isin(train_patients), "split"] = "train"
+    df.loc[df["subject_id"].isin(valid_patients), "split"] = "valid"
+    df.loc[df["subject_id"].isin(test_patients), "split"] = "test"
+
+    return df
 
 
 def main():
