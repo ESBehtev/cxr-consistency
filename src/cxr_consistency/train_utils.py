@@ -1,8 +1,9 @@
 from pathlib import Path
 
 import mlflow
+import numpy as np
 import torch
-from cxr_consistency.metrics import compute_metrics_with_best_threshold
+from cxr_consistency.metrics import compute_binary_metrics, compute_metrics_with_best_threshold
 from tqdm import tqdm
 
 
@@ -28,6 +29,73 @@ def move_batch_to_device(batch: dict, device: torch.device) -> dict:
     return moved
 
 
+def add_prediction_stats(
+    metrics: dict,
+    labels,
+    logits,
+    probs,
+) -> None:
+    labels = np.asarray(labels).astype(int)
+    logits = np.asarray(logits).astype(float)
+    probs = np.asarray(probs).astype(float)
+
+    for name, values in [("logits", logits), ("probs", probs)]:
+        metrics[f"{name}_mean"] = float(np.mean(values))
+        metrics[f"{name}_std"] = float(np.std(values))
+        metrics[f"{name}_min"] = float(np.min(values))
+        metrics[f"{name}_max"] = float(np.max(values))
+
+        for label in [0, 1]:
+            mask = labels == label
+            prefix = f"{name}_label{label}"
+
+            if not np.any(mask):
+                metrics[f"{prefix}_mean"] = 0.0
+                metrics[f"{prefix}_std"] = 0.0
+                metrics[f"{prefix}_min"] = 0.0
+                metrics[f"{prefix}_max"] = 0.0
+                continue
+
+            group = values[mask]
+            metrics[f"{prefix}_mean"] = float(np.mean(group))
+            metrics[f"{prefix}_std"] = float(np.std(group))
+            metrics[f"{prefix}_min"] = float(np.min(group))
+            metrics[f"{prefix}_max"] = float(np.max(group))
+
+
+def add_grouped_negative_type_metrics(
+    metrics: dict,
+    labels,
+    probs,
+    negative_types,
+) -> None:
+    labels = np.asarray(labels).astype(int)
+    probs = np.asarray(probs).astype(float)
+    negative_types = np.asarray(negative_types).astype(str)
+
+    for negative_type in sorted(set(negative_types.tolist()) - {"positive"}):
+        mask = (labels == 1) | ((labels == 0) & (negative_types == negative_type))
+        group_labels = labels[mask]
+        group_probs = probs[mask]
+
+        count_positive = int(np.sum(group_labels == 1))
+        count_negative = int(np.sum(group_labels == 0))
+
+        if count_positive == 0 or count_negative == 0:
+            continue
+
+        group_metrics = compute_binary_metrics(group_labels, group_probs)
+        safe_type = negative_type.replace("/", "_").replace(" ", "_")
+        prefix = f"by_type_{safe_type}"
+
+        metrics[f"{prefix}_accuracy"] = group_metrics["accuracy"]
+        metrics[f"{prefix}_f1"] = group_metrics["f1"]
+        metrics[f"{prefix}_roc_auc"] = group_metrics["roc_auc"]
+        metrics[f"{prefix}_pr_auc"] = group_metrics["pr_auc"]
+        metrics[f"{prefix}_count_positive"] = float(count_positive)
+        metrics[f"{prefix}_count_negative"] = float(count_negative)
+
+
 def train_epoch(
     model,
     dataloader,
@@ -43,7 +111,9 @@ def train_epoch(
 
     total_loss = 0.0
     all_labels = []
+    all_logits = []
     all_probs = []
+    all_negative_types = []
 
     progress_bar = tqdm(dataloader)
 
@@ -88,7 +158,9 @@ def train_epoch(
         total_loss += float(loss.item())
 
         all_labels.extend(labels.detach().cpu().numpy().tolist())
+        all_logits.extend(logits.detach().cpu().numpy().tolist())
         all_probs.extend(probs.detach().cpu().numpy().tolist())
+        all_negative_types.extend(batch["negative_type"])
 
         global_step = epoch * len(dataloader) + step + 1
 
@@ -104,7 +176,9 @@ def train_epoch(
             f"train_loss={loss.item():.4f}"
         )
 
-    metrics = compute_metrics_with_best_threshold(all_labels, all_probs)    
+    metrics = compute_metrics_with_best_threshold(all_labels, all_probs)
+    add_prediction_stats(metrics, all_labels, all_logits, all_probs)
+    add_grouped_negative_type_metrics(metrics, all_labels, all_probs, all_negative_types)
     metrics["loss"] = float(total_loss / len(dataloader))
 
     return metrics
@@ -121,7 +195,9 @@ def validate_epoch(
 
     total_loss = 0.0
     all_labels = []
+    all_logits = []
     all_probs = []
+    all_negative_types = []
 
     progress_bar = tqdm(dataloader)
 
@@ -145,13 +221,17 @@ def validate_epoch(
         total_loss += float(loss.item())
 
         all_labels.extend(labels.detach().cpu().numpy().tolist())
+        all_logits.extend(logits.detach().cpu().numpy().tolist())
         all_probs.extend(probs.detach().cpu().numpy().tolist())
+        all_negative_types.extend(batch["negative_type"])
 
         progress_bar.set_description(
             f"valid_loss={loss.item():.4f}"
         )
 
     metrics = compute_metrics_with_best_threshold(all_labels, all_probs)
+    add_prediction_stats(metrics, all_labels, all_logits, all_probs)
+    add_grouped_negative_type_metrics(metrics, all_labels, all_probs, all_negative_types)
     metrics["loss"] = float(total_loss / len(dataloader))
 
     return metrics
@@ -192,6 +272,59 @@ def print_metrics(prefix: str, metrics: dict):
         f"auc={metrics['roc_auc']:.4f} | "
         f"pr_auc={metrics['pr_auc']:.4f}"
     )
+    print(
+        f"{prefix} logits | "
+        f"mean={metrics['logits_mean']:.4f} "
+        f"std={metrics['logits_std']:.4f} "
+        f"min={metrics['logits_min']:.4f} "
+        f"max={metrics['logits_max']:.4f} | "
+        f"y0=({metrics['logits_label0_mean']:.4f},"
+        f"{metrics['logits_label0_std']:.4f},"
+        f"{metrics['logits_label0_min']:.4f},"
+        f"{metrics['logits_label0_max']:.4f}) "
+        f"y1=({metrics['logits_label1_mean']:.4f},"
+        f"{metrics['logits_label1_std']:.4f},"
+        f"{metrics['logits_label1_min']:.4f},"
+        f"{metrics['logits_label1_max']:.4f})"
+    )
+    print(
+        f"{prefix} probs  | "
+        f"mean={metrics['probs_mean']:.4f} "
+        f"std={metrics['probs_std']:.4f} "
+        f"min={metrics['probs_min']:.4f} "
+        f"max={metrics['probs_max']:.4f} | "
+        f"y0=({metrics['probs_label0_mean']:.4f},"
+        f"{metrics['probs_label0_std']:.4f},"
+        f"{metrics['probs_label0_min']:.4f},"
+        f"{metrics['probs_label0_max']:.4f}) "
+        f"y1=({metrics['probs_label1_mean']:.4f},"
+        f"{metrics['probs_label1_std']:.4f},"
+        f"{metrics['probs_label1_min']:.4f},"
+        f"{metrics['probs_label1_max']:.4f})"
+    )
+
+    grouped_prefixes = sorted(
+        {
+            key.rsplit("_", 1)[0]
+            for key in metrics
+            if key.startswith("by_type_") and key.endswith("_accuracy")
+        }
+    )
+
+    if grouped_prefixes:
+        print(f"{prefix} grouped by negative_type:")
+
+    for group_prefix in grouped_prefixes:
+        negative_type = group_prefix.replace("by_type_", "", 1)
+        print(
+            f"  {negative_type}: "
+            f"acc={metrics[f'{group_prefix}_accuracy']:.4f} "
+            f"f1={metrics[f'{group_prefix}_f1']:.4f} "
+            f"auc={metrics[f'{group_prefix}_roc_auc']:.4f} "
+            f"pr_auc={metrics[f'{group_prefix}_pr_auc']:.4f} "
+            f"pos={int(metrics[f'{group_prefix}_count_positive'])} "
+            f"neg={int(metrics[f'{group_prefix}_count_negative'])}"
+        )
 
 
 def log_metrics_to_mlflow(metrics: dict, step: int, prefix: str):

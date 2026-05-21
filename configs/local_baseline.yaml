@@ -1,0 +1,50 @@
+experiment_name: cxr_local_baseline
+experiment_dir: experiments/local_baseline
+mlflow_tracking_uri: sqlite:///experiments/local_baseline/mlflow_local.db
+
+pairs_csv: data/pairs/cxr_consistency_pairs.csv
+
+data:
+  include_negative_types:
+    - random_report
+    - view_matched_report
+    - pathology_matched_report
+    - distorted_negation
+    - distorted_pathology
+    - distorted_location
+    - distorted_severity
+
+tokenizer_name: simple
+trust_remote_code: false
+
+loss:
+  use_pos_weight: false
+
+image_encoder_name: mobilenet_v3_small
+text_encoder_name: simple
+
+pretrained_image: true
+
+freeze_image_encoder: true
+freeze_text_encoder: false
+
+image_size: 224
+max_length: 256
+
+projection_dim: 256
+dropout: 0.2
+
+batch_size: 8
+epochs: 5
+
+learning_rate: 1e-4
+weight_decay: 1e-4
+
+num_workers: 0
+
+max_train_samples: 10000
+max_valid_samples: 2000
+
+log_model: false
+log_batch_loss: false
+log_every_steps: 100

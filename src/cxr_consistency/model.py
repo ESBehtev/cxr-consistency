@@ -5,25 +5,6 @@ import timm
 from transformers import AutoModel
 
 
-IMAGE_ENCODER_DIMS = {
-    "resnet18": 512,
-    "resnet50": 2048,
-    "densenet121": 1024,
-    "efficientnet_b0": 1280,
-    "mobilenet_v3_small": 576,
-    "convnext_tiny": 768,
-    "vit_tiny": 192,
-    "vit_small": 384,
-    "vit_base": 768,
-    "swin_tiny": 768,
-    "biomedclip_vit": 768,
-}
-
-TEXT_ENCODER_DIMS = {
-    "simple": 256,
-}
-
-
 def get_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -72,35 +53,19 @@ def build_image_encoder(name: str, pretrained: bool = True) -> tuple[nn.Module, 
         return model, 768
 
     if name == "vit_tiny":
-        model = timm.create_model(
-            "vit_tiny_patch16_224",
-            pretrained=pretrained,
-            num_classes=0,
-        )
+        model = timm.create_model("vit_tiny_patch16_224", pretrained=pretrained, num_classes=0)
         return model, 192
 
     if name == "vit_small":
-        model = timm.create_model(
-            "vit_small_patch16_224",
-            pretrained=pretrained,
-            num_classes=0,
-        )
+        model = timm.create_model("vit_small_patch16_224", pretrained=pretrained, num_classes=0)
         return model, 384
 
     if name == "vit_base":
-        model = timm.create_model(
-            "vit_base_patch16_224",
-            pretrained=pretrained,
-            num_classes=0,
-        )
+        model = timm.create_model("vit_base_patch16_224", pretrained=pretrained, num_classes=0)
         return model, 768
 
     if name == "swin_tiny":
-        model = timm.create_model(
-            "swin_tiny_patch4_window7_224",
-            pretrained=pretrained,
-            num_classes=0,
-        )
+        model = timm.create_model("swin_tiny_patch4_window7_224", pretrained=pretrained, num_classes=0)
         return model, 768
 
     if name == "biomedclip_vit":
@@ -145,9 +110,7 @@ class SimpleTextEncoder(nn.Module):
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
         embedded = self.embedding(input_ids)
-
         _, hidden = self.encoder(embedded)
-
         return hidden[-1]
 
 
@@ -155,8 +118,31 @@ class TransformerTextEncoder(nn.Module):
     def __init__(self, model_name: str):
         super().__init__()
 
-        self.model = AutoModel.from_pretrained(model_name)
-        self.output_dim = self.model.config.hidden_size
+        self.model_name = model_name
+
+        self.model = AutoModel.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+        )
+
+        if hasattr(self.model.config, "hidden_size"):
+            self.output_dim = self.model.config.hidden_size
+        elif hasattr(self.model.config, "projection_dim"):
+            self.output_dim = self.model.config.projection_dim
+        else:
+            raise ValueError(
+                f"Cannot infer text encoder output dim for {model_name}"
+            )
+
+    def mean_pool(
+        self,
+        last_hidden_state: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        mask = attention_mask.unsqueeze(-1).type_as(last_hidden_state)
+        summed = (last_hidden_state * mask).sum(dim=1)
+        counts = mask.sum(dim=1).clamp(min=1e-6)
+        return summed / counts
 
     def forward(
         self,
@@ -168,7 +154,18 @@ class TransformerTextEncoder(nn.Module):
             attention_mask=attention_mask,
         )
 
-        return outputs.last_hidden_state[:, 0, :]
+        if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+            return outputs.pooler_output
+
+        if hasattr(outputs, "last_hidden_state"):
+            return self.mean_pool(outputs.last_hidden_state, attention_mask)
+
+        if isinstance(outputs, tuple):
+            return self.mean_pool(outputs[0], attention_mask)
+
+        raise ValueError(
+            f"Unsupported output format from text encoder: {self.model_name}"
+        )
 
 
 def build_text_encoder(
@@ -193,11 +190,11 @@ def build_text_encoder(
         "clinicalbert": "emilyalsentzer/Bio_ClinicalBERT",
         "pubmedbert": "microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext",
         "cxrbert": "microsoft/BiomedVLP-CXR-BERT-specialized",
+        "biomedvlp_cxr_bert": "microsoft/BiomedVLP-CXR-BERT-specialized",
         "biomedclip_text": "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224",
     }
 
     model_name = hf_names.get(name, name)
-
     encoder = TransformerTextEncoder(model_name)
 
     return encoder, encoder.output_dim
@@ -220,6 +217,8 @@ class CXRConsistencyModel(nn.Module):
 
         self.image_encoder_name = image_encoder_name
         self.text_encoder_name = text_encoder_name
+        self.freeze_image_encoder = freeze_image_encoder
+        self.freeze_text_encoder = freeze_text_encoder
 
         self.image_encoder, image_dim = build_image_encoder(
             image_encoder_name,
@@ -265,6 +264,17 @@ class CXRConsistencyModel(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(projection_dim // 2, 1),
         )
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+
+        if mode and self.freeze_image_encoder:
+            self.image_encoder.eval()
+
+        if mode and self.freeze_text_encoder:
+            self.text_encoder.eval()
+
+        return self
 
     def encode_image(self, image: torch.Tensor) -> torch.Tensor:
         features = self.image_encoder(image)

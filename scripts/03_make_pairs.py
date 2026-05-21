@@ -1,4 +1,5 @@
 from pathlib import Path
+import argparse
 import random
 import re
 from collections import defaultdict
@@ -15,6 +16,7 @@ OUTPUT_CSV = OUTPUT_DIR / "cxr_consistency_pairs.csv"
 
 RANDOM_SEED = 42
 random.seed(RANDOM_SEED)
+DEFAULT_NEGATIVES_PER_POSITIVE = 2
 
 MAX_POSITIVES_PER_SPLIT = None
 # Для отладки можно поставить:
@@ -78,8 +80,25 @@ NEGATION_PATTERNS = [
 ]
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input-csv", type=Path, default=INPUT_CSV)
+    parser.add_argument("--output-csv", type=Path, default=OUTPUT_CSV)
+    parser.add_argument(
+        "--negatives-per-positive",
+        type=int,
+        default=DEFAULT_NEGATIVES_PER_POSITIVE,
+        help="Use -1 to keep all generated negatives.",
+    )
+    return parser.parse_args()
+
+
 def normalize_spaces(text: str) -> str:
     return " ".join(str(text).split()).strip()
+
+
+def normalize_report_key(text: str) -> str:
+    return normalize_spaces(text).lower()
 
 
 def detect_pathology_group(text: str) -> str:
@@ -196,7 +215,9 @@ def row_to_positive(row: dict) -> dict:
         "label": 1,
         "negative_type": "positive",
         "subject_id": row["subject_id"],
+        "study_id": row.get("study_id"),
         "paired_report_subject_id": row["subject_id"],
+        "paired_report_study_id": row.get("study_id"),
         "view": row["view"],
         "split": row["split"],
     }
@@ -209,7 +230,9 @@ def make_swapped_negative(row: dict, candidate: dict, negative_type: str) -> dic
         "label": 0,
         "negative_type": negative_type,
         "subject_id": row["subject_id"],
+        "study_id": row.get("study_id"),
         "paired_report_subject_id": candidate["subject_id"],
+        "paired_report_study_id": candidate.get("study_id"),
         "view": row["view"],
         "split": row["split"],
     }
@@ -222,7 +245,9 @@ def make_distorted_negative(row: dict, distorted_report: str, negative_type: str
         "label": 0,
         "negative_type": negative_type,
         "subject_id": row["subject_id"],
+        "study_id": row.get("study_id"),
         "paired_report_subject_id": row["subject_id"],
+        "paired_report_study_id": row.get("study_id"),
         "view": row["view"],
         "split": row["split"],
     }
@@ -264,7 +289,20 @@ def sample_different_subject(candidates: list[dict], subject_id: int | str) -> d
     return random.choice(filtered)
 
 
-def make_pairs_for_split(split_df: pd.DataFrame) -> list[dict]:
+def add_if_unique_negative(negatives: list[dict], candidate: dict, seen_reports: set[str]) -> None:
+    report_key = normalize_report_key(candidate["report"])
+
+    if report_key in seen_reports:
+        return
+
+    seen_reports.add(report_key)
+    negatives.append(candidate)
+
+
+def make_pairs_for_split(
+    split_df: pd.DataFrame,
+    negatives_per_positive: int | None,
+) -> list[dict]:
     pairs = []
 
     records = split_df.to_dict("records")
@@ -272,6 +310,9 @@ def make_pairs_for_split(split_df: pd.DataFrame) -> list[dict]:
 
     for row in tqdm(records, total=len(records)):
         pairs.append(row_to_positive(row))
+        row_report_key = normalize_report_key(row["report"])
+        row_negatives = []
+        seen_negative_reports = {row_report_key}
 
         random_candidate = sample_different_subject(
             indices["all"],
@@ -279,12 +320,14 @@ def make_pairs_for_split(split_df: pd.DataFrame) -> list[dict]:
         )
 
         if random_candidate is not None:
-            pairs.append(
+            add_if_unique_negative(
+                row_negatives,
                 make_swapped_negative(
                     row=row,
                     candidate=random_candidate,
                     negative_type="random_report",
-                )
+                ),
+                seen_negative_reports,
             )
 
         view_candidate = sample_different_subject(
@@ -292,84 +335,148 @@ def make_pairs_for_split(split_df: pd.DataFrame) -> list[dict]:
             row["subject_id"],
         )
 
-        if view_candidate is None:
-            view_candidate = random_candidate
-
         if view_candidate is not None:
-            pairs.append(
+            add_if_unique_negative(
+                row_negatives,
                 make_swapped_negative(
                     row=row,
                     candidate=view_candidate,
                     negative_type="view_matched_report",
-                )
+                ),
+                seen_negative_reports,
             )
 
-        pathology_candidate = sample_different_subject(
-            indices["by_pathology"][row["pathology_group"]],
-            row["subject_id"],
-        )
+        pathology_candidate = None
+        pathology_group = row["pathology_group"]
 
-        if pathology_candidate is None:
-            pathology_candidate = random_candidate
+        if pathology_group != "normal_or_unspecified":
+            pathology_candidate = sample_different_subject(
+                indices["by_pathology"][pathology_group],
+                row["subject_id"],
+            )
 
         if pathology_candidate is not None:
-            pairs.append(
+            add_if_unique_negative(
+                row_negatives,
                 make_swapped_negative(
                     row=row,
                     candidate=pathology_candidate,
                     negative_type="pathology_matched_report",
-                )
+                ),
+                seen_negative_reports,
             )
 
         distorted = distort_negation(row["report"])
 
         if distorted is not None and distorted != row["report"]:
-            pairs.append(
+            add_if_unique_negative(
+                row_negatives,
                 make_distorted_negative(
                     row=row,
                     distorted_report=distorted,
                     negative_type="distorted_negation",
-                )
+                ),
+                seen_negative_reports,
             )
 
         distorted = distort_pathology(row["report"])
 
         if distorted is not None and distorted != row["report"]:
-            pairs.append(
+            add_if_unique_negative(
+                row_negatives,
                 make_distorted_negative(
                     row=row,
                     distorted_report=distorted,
                     negative_type="distorted_pathology",
-                )
+                ),
+                seen_negative_reports,
             )
 
         distorted = distort_location(row["report"])
 
         if distorted is not None and distorted != row["report"]:
-            pairs.append(
+            add_if_unique_negative(
+                row_negatives,
                 make_distorted_negative(
                     row=row,
                     distorted_report=distorted,
                     negative_type="distorted_location",
-                )
+                ),
+                seen_negative_reports,
             )
 
         distorted = distort_severity(row["report"])
 
         if distorted is not None and distorted != row["report"]:
-            pairs.append(
+            add_if_unique_negative(
+                row_negatives,
                 make_distorted_negative(
                     row=row,
                     distorted_report=distorted,
                     negative_type="distorted_severity",
-                )
+                ),
+                seen_negative_reports,
             )
+
+        if negatives_per_positive is not None and len(row_negatives) > negatives_per_positive:
+            row_negatives = random.sample(row_negatives, k=negatives_per_positive)
+
+        pairs.extend(row_negatives)
 
     return pairs
 
 
+def remove_contradictory_negatives(pairs_df: pd.DataFrame) -> pd.DataFrame:
+    pairs_df = pairs_df.copy()
+    pairs_df["report_key"] = pairs_df["report"].apply(normalize_report_key)
+
+    positive_keys = set(
+        pairs_df.loc[pairs_df["label"] == 1, ["image_path", "report_key"]]
+        .itertuples(index=False, name=None)
+    )
+
+    pair_keys = list(
+        pairs_df[["image_path", "report_key"]].itertuples(index=False, name=None)
+    )
+    contradictory_mask = (
+        pairs_df["label"].eq(0)
+        & pd.Series(
+            [key in positive_keys for key in pair_keys],
+            index=pairs_df.index,
+        )
+    )
+
+    removed = int(contradictory_mask.sum())
+    if removed:
+        print(f"\nRemoved contradictory negative pairs: {removed}")
+
+    pairs_df = pairs_df.loc[~contradictory_mask].copy()
+
+    before = len(pairs_df)
+    pairs_df = pairs_df.drop_duplicates(
+        subset=[
+            "image_path",
+            "report_key",
+            "label",
+        ]
+    ).copy()
+    removed_duplicates = before - len(pairs_df)
+
+    if removed_duplicates:
+        print(f"Removed duplicate pairs: {removed_duplicates}")
+
+    return pairs_df.drop(columns=["report_key"])
+
+
 def main() -> None:
-    df = pd.read_csv(INPUT_CSV)
+    args = parse_args()
+    negatives_per_positive = (
+        None
+        if args.negatives_per_positive < 0
+        else args.negatives_per_positive
+    )
+
+    df = pd.read_csv(args.input_csv)
 
     print(f"Loaded clean dataset: {len(df)} rows")
 
@@ -391,29 +498,26 @@ def main() -> None:
 
         print(f"\nMaking pairs for {split}: {len(split_df)} positives")
 
-        split_pairs = make_pairs_for_split(split_df)
+        split_pairs = make_pairs_for_split(
+            split_df=split_df,
+            negatives_per_positive=negatives_per_positive,
+        )
 
         all_pairs.extend(split_pairs)
 
     pairs_df = pd.DataFrame(all_pairs)
 
-    pairs_df = pairs_df.drop_duplicates(
-        subset=[
-            "image_path",
-            "report",
-            "label",
-            "negative_type",
-        ]
-    )
+    pairs_df = remove_contradictory_negatives(pairs_df)
 
     pairs_df = pairs_df.sample(
         frac=1.0,
         random_state=RANDOM_SEED,
     ).reset_index(drop=True)
 
-    pairs_df.to_csv(OUTPUT_CSV, index=False)
+    args.output_csv.parent.mkdir(parents=True, exist_ok=True)
+    pairs_df.to_csv(args.output_csv, index=False)
 
-    print(f"\nSaved pairs to {OUTPUT_CSV}")
+    print(f"\nSaved pairs to {args.output_csv}")
 
     print("\nLabels:")
     print(pairs_df["label"].value_counts())

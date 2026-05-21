@@ -16,6 +16,8 @@ class CXRConsistencyDataset(Dataset):
         image_size: int = 224,
         max_length: int = 256,
         max_samples: int | None = None,
+        include_negative_types: list[str] | None = None,
+        max_positives_per_negative: float | None = None,
     ):
         self.csv_path = Path(csv_path)
         self.tokenizer = tokenizer
@@ -25,6 +27,28 @@ class CXRConsistencyDataset(Dataset):
 
         df = pd.read_csv(self.csv_path)
         df = df[df["split"] == split].reset_index(drop=True)
+
+        if include_negative_types:
+            include_negative_types = set(include_negative_types)
+            is_positive = df["label"].astype(float) == 1.0
+            is_included_negative = (
+                (df["label"].astype(float) == 0.0)
+                & df["negative_type"].isin(include_negative_types)
+            )
+            df = df[is_positive | is_included_negative].reset_index(drop=True)
+
+        if max_positives_per_negative is not None:
+            positives = df[df["label"].astype(float) == 1.0]
+            negatives = df[df["label"].astype(float) == 0.0]
+            max_positives = int(len(negatives) * float(max_positives_per_negative))
+
+            if max_positives > 0 and len(positives) > max_positives:
+                positives = positives.sample(
+                    n=max_positives,
+                    random_state=42,
+                )
+                df = pd.concat([positives, negatives], ignore_index=True)
+                df = df.sample(frac=1.0, random_state=42).reset_index(drop=True)
 
         if max_samples is not None:
             df = df.sample(

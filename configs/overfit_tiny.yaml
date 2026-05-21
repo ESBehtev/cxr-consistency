@@ -1,0 +1,42 @@
+experiment_name: cxr_overfit_tiny
+experiment_dir: experiments/overfit_tiny
+mlflow_tracking_uri: sqlite:///experiments/overfit_tiny/mlflow.db
+
+pairs_csv: data/pairs/cxr_consistency_pairs.csv
+
+tokenizer_name: simple
+trust_remote_code: false
+
+image_encoder_name: mobilenet_v3_small
+text_encoder_name: simple
+
+pretrained_image: true
+
+freeze_image_encoder: true
+freeze_text_encoder: false
+
+image_size: 224
+max_length: 256
+
+projection_dim: 256
+dropout: 0.0
+
+batch_size: 16
+epochs: 50
+
+learning_rate: 1e-3
+weight_decay: 0.0
+
+num_workers: 0
+
+valid_split: train
+max_train_samples: 32
+max_valid_samples: 32
+
+loss:
+  use_pos_weight: false
+
+log_model: false
+log_batch_loss: false
+log_every_steps: 10
+tokenizer_debug_samples: 16
