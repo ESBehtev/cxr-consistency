@@ -3,32 +3,33 @@ experiment_dir: experiments/debug_run
 
 pairs_csv: data/pairs/cxr_consistency_pairs.csv
 
-tokenizer_name: distilbert-base-uncased
+tokenizer_name: microsoft/BiomedVLP-CXR-BERT-specialized
 
 image_encoder_name: efficientnet_b0
-text_encoder_name: simple
+text_encoder_name: cxrbert
 
 pretrained_image: true
 
-freeze_image_encoder: true
+freeze_image_encoder:  true
 freeze_text_encoder: false
 
 image_size: 224
 max_length: 128
 
 projection_dim: 256
-dropout: 0.2
+dropout: 0.3
 
-batch_size: 8
-epochs: 10
+batch_size: 16
+
+epochs: 20
 
 learning_rate: 1e-4
 weight_decay: 1e-4
 
 num_workers: 0
 
-max_train_samples: 2000
-max_valid_samples: 500
+max_train_samples: 20000
+max_valid_samples: 4000
 
 log_batch_loss: false
-log_every_steps: 50
+log_every_steps: 100
