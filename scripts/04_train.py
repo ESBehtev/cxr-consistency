@@ -109,6 +109,43 @@ def build_tokenizer(config: dict):
     )
 
 
+
+
+def build_scheduler(config: dict, optimizer, steps_per_epoch: int):
+    scheduler_type = config.get("scheduler_type")
+
+    if not scheduler_type or scheduler_type == "none":
+        return None
+
+    total_steps = int(steps_per_epoch * int(config["epochs"]))
+    warmup_steps = int(config.get("warmup_steps", 0))
+
+    if warmup_steps <= 0:
+        warmup_steps = int(total_steps * float(config.get("warmup_ratio", 0.0)))
+
+    def lr_lambda(current_step: int) -> float:
+        if warmup_steps > 0 and current_step < warmup_steps:
+            return float(current_step + 1) / float(max(1, warmup_steps))
+
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        progress = min(max(progress, 0.0), 1.0)
+
+        if scheduler_type == "linear":
+            return max(0.0, 1.0 - progress)
+
+        if scheduler_type == "cosine":
+            return 0.5 * (1.0 + torch.cos(torch.tensor(progress * 3.141592653589793))).item()
+
+        raise ValueError(f"Unsupported scheduler_type: {scheduler_type}")
+
+    print(
+        f"Using scheduler={scheduler_type}, total_steps={total_steps}, "
+        f"warmup_steps={warmup_steps}"
+    )
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+
 def use_pos_weight(config: dict) -> bool:
     loss_config = config.get("loss", {})
 
@@ -492,7 +529,11 @@ def main():
         weight_decay=float(config["weight_decay"]),
     )
 
-    scaler = torch.cuda.amp.GradScaler() if device.type == "cuda" else None
+    scheduler = build_scheduler(config, optimizer, len(train_loader))
+
+    use_amp = bool(config.get("amp", True))
+    scaler = torch.cuda.amp.GradScaler() if device.type == "cuda" and use_amp else None
+    print(f"AMP enabled: {scaler is not None}")
 
     experiment_dir = Path(config["experiment_dir"])
     experiment_dir.mkdir(parents=True, exist_ok=True)
@@ -532,9 +573,11 @@ def main():
                 criterion=criterion,
                 device=device,
                 scaler=scaler,
+                scheduler=scheduler,
                 epoch=epoch,
                 log_every_steps=config.get("log_every_steps", 50),
                 log_batch_loss=config.get("log_batch_loss", False),
+                grad_clip_norm=config.get("grad_clip_norm"),
             )
 
             valid_metrics = validate_epoch(
@@ -589,14 +632,15 @@ def main():
             if current_f1 > best_f1:
                 best_f1 = current_f1
 
-                save_checkpoint(
-                    model=model,
-                    optimizer=optimizer,
-                    epoch=epoch,
-                    metrics=valid_metrics,
-                    output_dir=experiment_dir,
-                    filename="best_model.pt",
-                )
+                if config.get("save_checkpoints", True):
+                    save_checkpoint(
+                        model=model,
+                        optimizer=optimizer,
+                        epoch=epoch,
+                        metrics=valid_metrics,
+                        output_dir=experiment_dir,
+                        filename="best_model.pt",
+                    )
 
                 log_metric(
                     key="best_valid_f1",

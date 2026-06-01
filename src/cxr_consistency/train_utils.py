@@ -62,6 +62,9 @@ def add_prediction_stats(
             metrics[f"{prefix}_min"] = float(np.min(group))
             metrics[f"{prefix}_max"] = float(np.max(group))
 
+    preds = (probs >= 0.5).astype(int)
+    metrics["pred_positive_fraction"] = float(np.mean(preds))
+
 
 def add_grouped_negative_type_metrics(
     metrics: dict,
@@ -103,17 +106,23 @@ def train_epoch(
     criterion,
     device,
     scaler=None,
+    scheduler=None,
     epoch: int = 0,
     log_every_steps: int = 10,
     log_batch_loss: bool = False,
+    grad_clip_norm: float | None = None,
 ):
     model.train()
 
     total_loss = 0.0
+    grad_norms = []
     all_labels = []
     all_logits = []
     all_probs = []
     all_negative_types = []
+
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     progress_bar = tqdm(dataloader)
 
@@ -139,6 +148,11 @@ def train_epoch(
                 loss = criterion(logits, labels)
 
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=float(grad_clip_norm) if grad_clip_norm is not None else float("inf"),
+            )
             scaler.step(optimizer)
             scaler.update()
 
@@ -151,11 +165,19 @@ def train_epoch(
             loss = criterion(logits, labels)
 
             loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=float(grad_clip_norm) if grad_clip_norm is not None else float("inf"),
+            )
             optimizer.step()
+
+        if scheduler is not None:
+            scheduler.step()
 
         probs = torch.sigmoid(logits)
 
         total_loss += float(loss.item())
+        grad_norms.append(float(grad_norm.detach().cpu()))
 
         all_labels.extend(labels.detach().cpu().numpy().tolist())
         all_logits.extend(logits.detach().cpu().numpy().tolist())
@@ -180,6 +202,14 @@ def train_epoch(
     add_prediction_stats(metrics, all_labels, all_logits, all_probs)
     add_grouped_negative_type_metrics(metrics, all_labels, all_probs, all_negative_types)
     metrics["loss"] = float(total_loss / len(dataloader))
+    metrics["grad_norm_mean"] = float(np.mean(grad_norms))
+    metrics["grad_norm_max"] = float(np.max(grad_norms))
+    metrics["lr"] = float(optimizer.param_groups[0]["lr"])
+
+    if device.type == "cuda":
+        metrics["cuda_peak_memory_mb"] = float(
+            torch.cuda.max_memory_allocated(device) / 1024 / 1024
+        )
 
     return metrics
 
@@ -198,6 +228,9 @@ def validate_epoch(
     all_logits = []
     all_probs = []
     all_negative_types = []
+
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     progress_bar = tqdm(dataloader)
 
@@ -233,6 +266,11 @@ def validate_epoch(
     add_prediction_stats(metrics, all_labels, all_logits, all_probs)
     add_grouped_negative_type_metrics(metrics, all_labels, all_probs, all_negative_types)
     metrics["loss"] = float(total_loss / len(dataloader))
+
+    if device.type == "cuda":
+        metrics["cuda_peak_memory_mb"] = float(
+            torch.cuda.max_memory_allocated(device) / 1024 / 1024
+        )
 
     return metrics
 
@@ -272,6 +310,20 @@ def print_metrics(prefix: str, metrics: dict):
         f"auc={metrics['roc_auc']:.4f} | "
         f"pr_auc={metrics['pr_auc']:.4f}"
     )
+    extra = []
+    if "pred_positive_fraction" in metrics:
+        extra.append(f"pred_pos={metrics['pred_positive_fraction']:.4f}")
+    if "grad_norm_mean" in metrics:
+        extra.append(
+            f"grad_norm={metrics['grad_norm_mean']:.4f}/{metrics['grad_norm_max']:.4f}"
+        )
+    if "lr" in metrics:
+        extra.append(f"lr={metrics['lr']:.2e}")
+    if "cuda_peak_memory_mb" in metrics:
+        extra.append(f"cuda_peak={metrics['cuda_peak_memory_mb']:.0f}MB")
+    if extra:
+        print(f"{prefix} diag | " + " | ".join(extra))
+
     print(
         f"{prefix} logits | "
         f"mean={metrics['logits_mean']:.4f} "

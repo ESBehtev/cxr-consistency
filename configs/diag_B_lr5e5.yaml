@@ -1,0 +1,54 @@
+experiment_name: cxr_diag_B_lr5e5
+experiment_dir: experiments/diag_B_lr5e5
+mlflow_tracking_uri: sqlite:///experiments/diag_B_lr5e5/mlflow.db
+device: cuda
+
+pairs_csv: data/pairs/cxr_consistency_pairs.csv
+
+data:
+  include_negative_types:
+    - random_report
+    - pathology_matched_report
+    - distorted_negation
+
+tokenizer_name: microsoft/BiomedVLP-CXR-BERT-specialized
+trust_remote_code: true
+local_files_only: false
+
+image_encoder_name: convnext_tiny
+text_encoder_name: cxrbert
+pretrained_image: true
+
+freeze_image_encoder: false
+freeze_text_encoder: false
+
+image_size: 224
+max_length: 256
+
+projection_dim: 512
+dropout: 0.2
+
+batch_size: 48
+epochs: 1
+
+learning_rate: 5e-5
+weight_decay: 1e-4
+grad_clip_norm: 1.0
+scheduler_type: none
+warmup_ratio: 0.0
+amp: true
+
+num_workers: 8
+
+max_train_samples: 30000
+max_valid_samples: 6000
+
+loss:
+  use_pos_weight: false
+
+log_model: false
+log_batch_loss: false
+log_every_steps: 100
+tokenizer_debug_samples: 16
+
+save_checkpoints: false
