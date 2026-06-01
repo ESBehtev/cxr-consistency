@@ -1,3 +1,10 @@
+# WARNING: Legacy/noisy pair generator.
+# Current hard baseline uses scripts/03_make_hard_pairs.py and
+# data/pairs/cxr_consistency_pairs_hard.csv. This script is kept only
+# for old/easy sanity baselines and may generate noisy types such as
+# view_matched_report, distorted_pathology, distorted_location, and
+# distorted_severity.
+
 from pathlib import Path
 import argparse
 import random
