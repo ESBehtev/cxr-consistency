@@ -541,6 +541,21 @@ def main():
     best_f1 = -1.0
     history = init_history()
 
+    early_stopping_config = config.get("early_stopping", {})
+    early_stopping_enabled = bool(early_stopping_config.get("enabled", False))
+    early_stopping_monitor = str(early_stopping_config.get("monitor", "valid_roc_auc"))
+    early_stopping_mode = str(early_stopping_config.get("mode", "max"))
+    early_stopping_patience = int(early_stopping_config.get("patience", 2))
+    early_stopping_min_delta = float(early_stopping_config.get("min_delta", 0.001))
+
+    if early_stopping_mode not in {"max", "min"}:
+        raise ValueError(f"Unsupported early_stopping.mode: {early_stopping_mode}")
+
+    best_monitor_value = -float("inf") if early_stopping_mode == "max" else float("inf")
+    best_monitor_epoch = 0
+    epochs_without_improvement = 0
+    stopped_early = False
+
     with mlflow.start_run() as run:
         run_id = run.info.run_id
         model_id = None
@@ -649,7 +664,57 @@ def main():
                     model_id=model_id,
                 )
 
+            if early_stopping_enabled:
+                metric_prefix = "valid_" if early_stopping_monitor.startswith("valid_") else ""
+                monitor_key = early_stopping_monitor[len(metric_prefix):] if metric_prefix else early_stopping_monitor
+                monitor_metrics = valid_metrics if metric_prefix == "valid_" else train_metrics
+
+                if monitor_key not in monitor_metrics:
+                    raise KeyError(
+                        f"Early stopping monitor '{early_stopping_monitor}' not found in epoch metrics"
+                    )
+
+                monitor_value = float(monitor_metrics[monitor_key])
+                if early_stopping_mode == "max":
+                    improved = monitor_value > best_monitor_value + early_stopping_min_delta
+                else:
+                    improved = monitor_value < best_monitor_value - early_stopping_min_delta
+
+                if improved:
+                    best_monitor_value = monitor_value
+                    best_monitor_epoch = step
+                    epochs_without_improvement = 0
+                else:
+                    epochs_without_improvement += 1
+
+                log_metric("early_stopping_monitor_value", monitor_value, step, model_id)
+                log_metric("early_stopping_best_value", best_monitor_value, step, model_id)
+                log_metric("early_stopping_best_epoch", float(best_monitor_epoch), step, model_id)
+                log_metric("early_stopping_epochs_without_improvement", float(epochs_without_improvement), step, model_id)
+
+                print(
+                    f"Early stopping: monitor={early_stopping_monitor} "
+                    f"value={monitor_value:.6f} best={best_monitor_value:.6f} "
+                    f"best_epoch={best_monitor_epoch} "
+                    f"no_improve={epochs_without_improvement}/{early_stopping_patience}"
+                )
+
+                if epochs_without_improvement >= early_stopping_patience:
+                    stopped_early = True
+                    print(f"Early stopping triggered at epoch {step}")
+                    break
+
+        mlflow.log_metric("early_stopping_stopped", float(stopped_early), step=history["epoch"][-1] if history["epoch"] else 0, synchronous=True)
+        mlflow.set_tag("early_stopping_stopped", str(stopped_early))
+        mlflow.set_tag("early_stopping_best_epoch", str(best_monitor_epoch))
+        mlflow.set_tag("early_stopping_best_value", str(best_monitor_value))
+
         print(f"\nBest validation F1: {best_f1:.4f}")
+        if early_stopping_enabled:
+            print(
+                f"Best {early_stopping_monitor}: {best_monitor_value:.4f} "
+                f"at epoch {best_monitor_epoch}; stopped_early={stopped_early}"
+            )
 
 
 if __name__ == "__main__":
