@@ -64,6 +64,14 @@ def build_image_encoder(name: str, pretrained: bool = True) -> tuple[nn.Module, 
         model = timm.create_model("vit_base_patch16_224", pretrained=pretrained, num_classes=0)
         return model, 768
 
+    if name == "deit_small":
+        model = timm.create_model("deit_small_patch16_224", pretrained=pretrained, num_classes=0)
+        return model, 384
+
+    if name == "deit_base":
+        model = timm.create_model("deit_base_patch16_224", pretrained=pretrained, num_classes=0)
+        return model, 768
+
     if name == "swin_tiny":
         model = timm.create_model("swin_tiny_patch4_window7_224", pretrained=pretrained, num_classes=0)
         return model, 768
