@@ -1,0 +1,64 @@
+pairs_csv: data/pairs/cxr_consistency_pairs_hard.csv
+data:
+  include_negative_types:
+  - pathology_matched_report
+  - distorted_negation
+  - laterality_conflict
+  - temporal_mismatch
+  - pathology_semantic_swap
+  - partial_mismatch
+tokenizer_name: microsoft/BiomedVLP-CXR-BERT-specialized
+trust_remote_code: true
+local_files_only: false
+text_encoder_name: cxrbert
+pretrained_image: true
+freeze_image_encoder: false
+freeze_text_encoder: true
+image_size: 224
+projection_dim: 512
+dropout: 0.2
+learning_rate: 8e-6
+weight_decay: 1e-4
+grad_clip_norm: 1.0
+scheduler_type: cosine
+warmup_ratio: 0.12
+amp: true
+num_workers: 4
+max_train_samples: 60000
+max_valid_samples: 12000
+loss:
+  use_pos_weight: false
+use_mlflow: false
+log_model: false
+log_batch_loss: false
+log_every_steps: 100
+tokenizer_debug_samples: 16
+save_checkpoints: false
+epochs: 6
+early_stopping:
+  enabled: true
+  monitor: valid_roc_auc
+  mode: max
+  patience: 2
+  min_delta: 0.001
+collapse_detection:
+  min_probs_std: 1.0e-05
+  min_logits_std: 1.0e-05
+  weak_auc: 0.55
+  weak_probs_std: 0.001
+device: cuda
+image_encoder_name: deit_base
+batch_size: 8
+max_length: 128
+run_name: deit_base_nocollapse_text_cxrbert_frozen
+run_family: deit
+model_type: deit_base
+experiment_name: text_sweep_deit_base_nocollapse_text_cxrbert_frozen
+experiment_dir: experiments/text_sweeps/deit_base_nocollapse_text_cxrbert_frozen
+resources:
+  expected_vram_mb: 8000
+  family: deit
+  model_type: deit_base
+  stage: text_sweep
+run_stage: text_sweep
+text_variant: cxrbert_frozen

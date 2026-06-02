@@ -16,21 +16,25 @@ freeze_image_encoder: false
 freeze_text_encoder: false
 image_size: 224
 projection_dim: 512
+dropout: 0.2
+learning_rate: 3e-5
 weight_decay: 1e-4
 grad_clip_norm: 1.0
+scheduler_type: cosine
+warmup_ratio: 0.05
 amp: true
-num_workers: 2
-max_train_samples: 256
-max_valid_samples: 128
+num_workers: 4
+max_train_samples: 30000
+max_valid_samples: 6000
 loss:
   use_pos_weight: false
 use_mlflow: false
 log_model: false
 log_batch_loss: false
-log_every_steps: 20
-tokenizer_debug_samples: 8
+log_every_steps: 100
+tokenizer_debug_samples: 16
 save_checkpoints: false
-epochs: 1
+epochs: 3
 early_stopping:
   enabled: true
   monitor: valid_roc_auc
@@ -38,19 +42,23 @@ early_stopping:
   patience: 1
   min_delta: 0.001
 collapse_detection:
-  min_probs_std: 0.0001
-  min_logits_std: 0.0001
+  min_probs_std: 1.0e-05
+  min_logits_std: 1.0e-05
   weak_auc: 0.55
-  weak_probs_std: 0.005
-image_encoder_name: convnext_tiny
-max_length: 256
-batch_size: 16
-learning_rate: 3e-5
-dropout: 0.35
-scheduler_type: none
-warmup_ratio: 0.0
-run_name: convnext_higher_dropout
-experiment_name: parallel_a6000_convnext_higher_dropout
-experiment_dir: experiments/parallel_a6000/convnext_higher_dropout
-mlflow_tracking_uri: sqlite:///experiments/parallel_a6000/convnext_higher_dropout/mlflow_disabled.db
+  weak_probs_std: 0.001
 device: cuda
+image_encoder_name: convnext_tiny
+batch_size: 48
+max_length: 256
+run_name: convnext_tiny_cosine_text_cxrbert_unfrozen_compact
+run_family: convnext
+model_type: convnext_tiny
+experiment_name: text_sweep_compact_convnext_tiny_cosine_text_cxrbert_unfrozen_compact
+experiment_dir: experiments/text_sweeps_compact/convnext_tiny_cosine_text_cxrbert_unfrozen_compact
+resources:
+  expected_vram_mb: 11000
+  family: convnext
+  model_type: convnext_tiny
+  stage: text_sweep_compact
+run_stage: text_sweep_compact
+text_variant: cxrbert_unfrozen

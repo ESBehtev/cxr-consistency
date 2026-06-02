@@ -234,4 +234,6 @@ mlflow.db-shm
 mlflow.db-wal
 
 .DS_Store
-*.db
+*.dbresults/coursework_export/
+
+/results/coursework_export/
