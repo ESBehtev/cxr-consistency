@@ -1,7 +1,10 @@
 from pathlib import Path
 import argparse
+from contextlib import nullcontext
+import json
 import os
 import sys
+import time
 import yaml
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -19,7 +22,6 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
-import mlflow
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -70,6 +72,8 @@ def load_config(path: str):
 
 
 def prepare_mlflow_tracking(config: dict) -> None:
+    import mlflow
+
     tracking_uri = config.get("mlflow_tracking_uri", "sqlite:///mlflow_clean.db")
 
     if tracking_uri.startswith("sqlite:///"):
@@ -307,6 +311,8 @@ def log_metric(
     step: int,
     model_id: str | None,
 ) -> None:
+    import mlflow
+
     kwargs = {
         "key": key,
         "value": float(value),
@@ -371,6 +377,8 @@ def log_epoch_metrics(
 
     metrics_to_log["epoch"] = float(step)
 
+    import mlflow
+
     mlflow.log_metrics(
         metrics=metrics_to_log,
         step=step,
@@ -425,10 +433,13 @@ def plot_training_curves(history: dict, output_dir: Path) -> None:
         plt.savefig(path, dpi=200, bbox_inches="tight")
         plt.close()
 
+        import mlflow
+
         mlflow.log_artifact(str(path), artifact_path="plots")
 
 
 def log_history_table(history: dict) -> None:
+    import mlflow
     import pandas as pd
 
     df = pd.DataFrame(history)
@@ -439,14 +450,87 @@ def log_history_table(history: dict) -> None:
     )
 
 
+def write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+
+def append_jsonl(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        json.dump(payload, f, sort_keys=True)
+        f.write("\n")
+
+
+def build_metrics_row(train_metrics: dict, valid_metrics: dict, step: int) -> dict:
+    row = {"epoch": int(step)}
+
+    for key, value in train_metrics.items():
+        row[f"train_{key}"] = float(value)
+
+    for key, value in valid_metrics.items():
+        row[f"valid_{key}"] = float(value)
+
+    return row
+
+
+def detect_collapse(valid_metrics: dict, config: dict) -> tuple[bool, str | None]:
+    collapse_config = config.get("collapse_detection", {}) or {}
+    min_probs_std = float(collapse_config.get("min_probs_std", 1e-4))
+    min_logits_std = float(collapse_config.get("min_logits_std", 1e-4))
+    weak_auc = float(collapse_config.get("weak_auc", 0.55))
+    weak_probs_std = float(collapse_config.get("weak_probs_std", 0.005))
+
+    probs_std = float(valid_metrics.get("probs_std", 0.0))
+    logits_std = float(valid_metrics.get("logits_std", 0.0))
+    roc_auc = float(valid_metrics.get("roc_auc", 0.0))
+    pred_pos = float(valid_metrics.get("pred_positive_fraction", 0.0))
+
+    if probs_std <= min_probs_std:
+        return True, f"valid probs_std={probs_std:.6g} <= {min_probs_std:.6g}"
+
+    if logits_std <= min_logits_std:
+        return True, f"valid logits_std={logits_std:.6g} <= {min_logits_std:.6g}"
+
+    if roc_auc <= weak_auc and pred_pos in {0.0, 1.0}:
+        return True, (
+            f"degenerate predictions with random-ish AUC: roc_auc={roc_auc:.4f}, "
+            f"pred_positive_fraction={pred_pos:.4f}"
+        )
+
+    if roc_auc <= weak_auc and probs_std <= weak_probs_std:
+        return True, (
+            f"weak AUC/prob spread: roc_auc={roc_auc:.4f}, "
+            f"probs_std={probs_std:.6g}, pred_positive_fraction={pred_pos:.4f}"
+        )
+
+    return False, None
+
+
 def main():
     args = parse_args()
     config = load_config(args.config)
+    use_mlflow = bool(config.get("use_mlflow", True))
 
-    prepare_mlflow_tracking(config)
+    if use_mlflow:
+        import mlflow
+
+        prepare_mlflow_tracking(config)
+    else:
+        mlflow = None
 
     device = resolve_device(config)
     print(f"Using device: {device}")
+    print(f"MLflow enabled: {use_mlflow}")
+
+    experiment_dir = Path(config["experiment_dir"])
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+
+    if not use_mlflow:
+        with (experiment_dir / "config_snapshot.yaml").open("w") as f:
+            yaml.safe_dump(config, f, sort_keys=False)
 
     tokenizer = build_tokenizer(config)
     data_config = get_data_config(config)
@@ -535,10 +619,9 @@ def main():
     scaler = torch.cuda.amp.GradScaler() if device.type == "cuda" and use_amp else None
     print(f"AMP enabled: {scaler is not None}")
 
-    experiment_dir = Path(config["experiment_dir"])
-    experiment_dir.mkdir(parents=True, exist_ok=True)
-
     best_f1 = -1.0
+    best_valid_roc_auc = -1.0
+    best_threshold = 0.5
     history = init_history()
 
     early_stopping_config = config.get("early_stopping", {})
@@ -555,28 +638,29 @@ def main():
     best_monitor_epoch = 0
     epochs_without_improvement = 0
     stopped_early = False
+    collapsed = False
+    collapse_reason = None
+    started_at = time.time()
 
-    with mlflow.start_run() as run:
-        run_id = run.info.run_id
+    run_context = mlflow.start_run() if use_mlflow else nullcontext(None)
+    with run_context as run:
+        run_id = run.info.run_id if use_mlflow else None
         model_id = None
 
-        if config.get("log_model", False):
-            logged_model = mlflow.pytorch.log_model(
-                model,
-                name="model",
+        if use_mlflow:
+            if config.get("log_model", False):
+                logged_model = mlflow.pytorch.log_model(model, name="model")
+                model_id = logged_model.model_id
+
+            mlflow.log_params(flatten_config(config))
+            mlflow.set_tags(
+                {
+                    "project": "cxr_consistency",
+                    "task": "multimodal_consistency",
+                    "image_encoder": config["image_encoder_name"],
+                    "text_encoder": config["text_encoder_name"],
+                }
             )
-            model_id = logged_model.model_id
-
-        mlflow.log_params(flatten_config(config))
-
-        mlflow.set_tags(
-            {
-                "project": "cxr_consistency",
-                "task": "multimodal_consistency",
-                "image_encoder": config["image_encoder_name"],
-                "text_encoder": config["text_encoder_name"],
-            }
-        )
 
         for epoch in range(config["epochs"]):
             print(f"\nEpoch {epoch + 1}/{config['epochs']}")
@@ -592,6 +676,7 @@ def main():
                 epoch=epoch,
                 log_every_steps=config.get("log_every_steps", 50),
                 log_batch_loss=config.get("log_batch_loss", False),
+                use_mlflow=use_mlflow,
                 grad_clip_norm=config.get("grad_clip_norm"),
             )
 
@@ -606,27 +691,15 @@ def main():
             print_metrics("VALID", valid_metrics)
 
             step = epoch + 1
+            metrics_row = build_metrics_row(train_metrics, valid_metrics, step)
 
-            metrics_to_log = {}
-
-            for key, value in train_metrics.items():
-                metrics_to_log[f"train_{key}"] = float(value)
-
-            for key, value in valid_metrics.items():
-                metrics_to_log[f"valid_{key}"] = float(value)
-
-            metrics_to_log["epoch"] = float(step)
-
-            for key, value in metrics_to_log.items():
-                log_metric(
-                    key=key,
-                    value=value,
-                    step=step,
-                    model_id=model_id,
-                )
-
-            print(f"Logged epoch metrics to MLflow run_id={run_id}")
-            print("Logged metrics:", ", ".join(metrics_to_log.keys()))
+            if use_mlflow:
+                for key, value in metrics_row.items():
+                    log_metric(key=key, value=value, step=step, model_id=model_id)
+                print(f"Logged epoch metrics to MLflow run_id={run_id}")
+            else:
+                append_jsonl(experiment_dir / "metrics.jsonl", metrics_row)
+                print(f"Logged epoch metrics to {experiment_dir / 'metrics.jsonl'}")
 
             update_history(
                 history=history,
@@ -635,17 +708,17 @@ def main():
                 epoch=epoch,
             )
 
-            log_history_table(history)
-
-            plot_training_curves(
-                history=history,
-                output_dir=experiment_dir,
-            )
+            if use_mlflow:
+                log_history_table(history)
+                plot_training_curves(history=history, output_dir=experiment_dir)
 
             current_f1 = valid_metrics.get("best_f1", valid_metrics["f1"])
+            current_roc_auc = valid_metrics.get("roc_auc", 0.0)
+            current_threshold = valid_metrics.get("best_threshold", valid_metrics.get("threshold", 0.5))
 
             if current_f1 > best_f1:
-                best_f1 = current_f1
+                best_f1 = float(current_f1)
+                best_threshold = float(current_threshold)
 
                 if config.get("save_checkpoints", True):
                     save_checkpoint(
@@ -657,12 +730,16 @@ def main():
                         filename="best_model.pt",
                     )
 
-                log_metric(
-                    key="best_valid_f1",
-                    value=float(best_f1),
-                    step=step,
-                    model_id=model_id,
-                )
+                if use_mlflow:
+                    log_metric("best_valid_f1", float(best_f1), step, model_id)
+
+            best_valid_roc_auc = max(best_valid_roc_auc, float(current_roc_auc))
+
+            collapsed, collapse_reason = detect_collapse(valid_metrics, config)
+            if collapsed:
+                print(f"COLLAPSED: {collapse_reason}")
+                stopped_early = True
+                break
 
             if early_stopping_enabled:
                 metric_prefix = "valid_" if early_stopping_monitor.startswith("valid_") else ""
@@ -687,10 +764,11 @@ def main():
                 else:
                     epochs_without_improvement += 1
 
-                log_metric("early_stopping_monitor_value", monitor_value, step, model_id)
-                log_metric("early_stopping_best_value", best_monitor_value, step, model_id)
-                log_metric("early_stopping_best_epoch", float(best_monitor_epoch), step, model_id)
-                log_metric("early_stopping_epochs_without_improvement", float(epochs_without_improvement), step, model_id)
+                if use_mlflow:
+                    log_metric("early_stopping_monitor_value", monitor_value, step, model_id)
+                    log_metric("early_stopping_best_value", best_monitor_value, step, model_id)
+                    log_metric("early_stopping_best_epoch", float(best_monitor_epoch), step, model_id)
+                    log_metric("early_stopping_epochs_without_improvement", float(epochs_without_improvement), step, model_id)
 
                 print(
                     f"Early stopping: monitor={early_stopping_monitor} "
@@ -704,17 +782,38 @@ def main():
                     print(f"Early stopping triggered at epoch {step}")
                     break
 
-        mlflow.log_metric("early_stopping_stopped", float(stopped_early), step=history["epoch"][-1] if history["epoch"] else 0, synchronous=True)
-        mlflow.set_tag("early_stopping_stopped", str(stopped_early))
-        mlflow.set_tag("early_stopping_best_epoch", str(best_monitor_epoch))
-        mlflow.set_tag("early_stopping_best_value", str(best_monitor_value))
+        epochs_completed = len(history["epoch"])
+        peak_vram_mb = 0.0
+        for key in ("train_cuda_peak_memory_mb", "valid_cuda_peak_memory_mb"):
+            if key in history:
+                peak_vram_mb = max(peak_vram_mb, max(history[key]))
+
+        summary = {
+            "run_name": config.get("run_name", Path(args.config).stem),
+            "status": "COLLAPSED" if collapsed else "OK",
+            "epochs_completed": epochs_completed,
+            "best_valid_roc_auc": float(best_valid_roc_auc),
+            "best_valid_f1": float(best_f1),
+            "best_threshold": float(best_threshold),
+            "peak_vram_mb": float(peak_vram_mb),
+            "runtime_min": float((time.time() - started_at) / 60.0),
+            "collapse_detected": bool(collapsed),
+            "collapse_reason": collapse_reason,
+            "early_stopping_stopped": bool(stopped_early),
+            "early_stopping_best_epoch": int(best_monitor_epoch),
+            "early_stopping_best_value": float(best_monitor_value) if best_monitor_epoch else None,
+        }
+
+        if not use_mlflow:
+            write_json(experiment_dir / "summary.json", summary)
+        else:
+            mlflow.log_metric("early_stopping_stopped", float(stopped_early), step=epochs_completed, synchronous=True)
+            mlflow.set_tag("early_stopping_stopped", str(stopped_early))
+            mlflow.set_tag("early_stopping_best_epoch", str(best_monitor_epoch))
+            mlflow.set_tag("early_stopping_best_value", str(best_monitor_value))
 
         print(f"\nBest validation F1: {best_f1:.4f}")
-        if early_stopping_enabled:
-            print(
-                f"Best {early_stopping_monitor}: {best_monitor_value:.4f} "
-                f"at epoch {best_monitor_epoch}; stopped_early={stopped_early}"
-            )
+        print(f"Summary: {summary}")
 
 
 if __name__ == "__main__":

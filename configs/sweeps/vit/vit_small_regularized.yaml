@@ -1,0 +1,61 @@
+pairs_csv: data/pairs/cxr_consistency_pairs_hard.csv
+data:
+  include_negative_types:
+  - pathology_matched_report
+  - distorted_negation
+  - laterality_conflict
+  - temporal_mismatch
+  - pathology_semantic_swap
+  - partial_mismatch
+tokenizer_name: microsoft/BiomedVLP-CXR-BERT-specialized
+trust_remote_code: true
+local_files_only: false
+text_encoder_name: cxrbert
+pretrained_image: true
+freeze_image_encoder: false
+freeze_text_encoder: false
+image_size: 224
+projection_dim: 512
+dropout: 0.35
+learning_rate: 1e-5
+weight_decay: 2e-4
+grad_clip_norm: 1.0
+scheduler_type: cosine
+warmup_ratio: 0.15
+amp: true
+num_workers: 4
+max_train_samples: 12000
+max_valid_samples: 3000
+loss:
+  use_pos_weight: false
+use_mlflow: false
+log_model: false
+log_batch_loss: false
+log_every_steps: 100
+tokenizer_debug_samples: 16
+save_checkpoints: false
+epochs: 6
+early_stopping:
+  enabled: true
+  monitor: valid_roc_auc
+  mode: max
+  patience: 2
+  min_delta: 0.001
+collapse_detection:
+  min_probs_std: 1.0e-05
+  min_logits_std: 1.0e-05
+  weak_auc: 0.55
+  weak_probs_std: 0.001
+device: cuda
+image_encoder_name: vit_small
+batch_size: 16
+max_length: 128
+run_name: vit_small_regularized
+run_family: vit
+model_type: vit_small
+experiment_name: sweep_a6000_vit_small_regularized
+experiment_dir: experiments/sweeps/vit_small_regularized
+resources:
+  expected_vram_mb: 8000
+  family: vit
+  model_type: vit_small

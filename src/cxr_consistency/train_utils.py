@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import mlflow
 import numpy as np
 import torch
 from cxr_consistency.metrics import compute_binary_metrics, compute_metrics_with_best_threshold
@@ -110,6 +109,7 @@ def train_epoch(
     epoch: int = 0,
     log_every_steps: int = 10,
     log_batch_loss: bool = False,
+    use_mlflow: bool = True,
     grad_clip_norm: float | None = None,
 ):
     model.train()
@@ -186,7 +186,9 @@ def train_epoch(
 
         global_step = epoch * len(dataloader) + step + 1
 
-        if log_batch_loss and step % log_every_steps == 0:
+        if use_mlflow and log_batch_loss and step % log_every_steps == 0:
+            import mlflow
+
             mlflow.log_metric(
                 key="train_batch_loss",
                 value=float(loss.item()),
@@ -380,6 +382,8 @@ def print_metrics(prefix: str, metrics: dict):
 
 
 def log_metrics_to_mlflow(metrics: dict, step: int, prefix: str):
+    import mlflow
+
     for metric_name, value in metrics.items():
         mlflow.log_metric(
             key=f"{prefix}_{metric_name}",

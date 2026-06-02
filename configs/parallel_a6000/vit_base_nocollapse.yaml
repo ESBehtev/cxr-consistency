@@ -1,0 +1,56 @@
+pairs_csv: data/pairs/cxr_consistency_pairs_hard.csv
+data:
+  include_negative_types:
+  - pathology_matched_report
+  - distorted_negation
+  - laterality_conflict
+  - temporal_mismatch
+  - pathology_semantic_swap
+  - partial_mismatch
+tokenizer_name: microsoft/BiomedVLP-CXR-BERT-specialized
+trust_remote_code: true
+local_files_only: false
+text_encoder_name: cxrbert
+pretrained_image: true
+freeze_image_encoder: false
+freeze_text_encoder: false
+image_size: 224
+projection_dim: 512
+weight_decay: 1e-4
+grad_clip_norm: 1.0
+amp: true
+num_workers: 2
+max_train_samples: 256
+max_valid_samples: 128
+loss:
+  use_pos_weight: false
+use_mlflow: false
+log_model: false
+log_batch_loss: false
+log_every_steps: 20
+tokenizer_debug_samples: 8
+save_checkpoints: false
+epochs: 1
+early_stopping:
+  enabled: true
+  monitor: valid_roc_auc
+  mode: max
+  patience: 1
+  min_delta: 0.001
+collapse_detection:
+  min_probs_std: 0.0001
+  min_logits_std: 0.0001
+  weak_auc: 0.55
+  weak_probs_std: 0.005
+image_encoder_name: vit_base
+max_length: 128
+batch_size: 4
+learning_rate: 1e-5
+dropout: 0.2
+scheduler_type: cosine
+warmup_ratio: 0.1
+run_name: vit_base_nocollapse
+experiment_name: parallel_a6000_vit_base_nocollapse
+experiment_dir: experiments/parallel_a6000/vit_base_nocollapse
+mlflow_tracking_uri: sqlite:///experiments/parallel_a6000/vit_base_nocollapse/mlflow_disabled.db
+device: cuda

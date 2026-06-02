@@ -52,6 +52,18 @@ def build_image_encoder(name: str, pretrained: bool = True) -> tuple[nn.Module, 
         model.classifier = nn.Identity()
         return model, 768
 
+    if name == "convnext_small":
+        weights = tv_models.ConvNeXt_Small_Weights.DEFAULT if pretrained else None
+        model = tv_models.convnext_small(weights=weights)
+        model.classifier = nn.Identity()
+        return model, 768
+
+    if name == "convnext_base":
+        weights = tv_models.ConvNeXt_Base_Weights.DEFAULT if pretrained else None
+        model = tv_models.convnext_base(weights=weights)
+        model.classifier = nn.Identity()
+        return model, 1024
+
     if name == "vit_tiny":
         model = timm.create_model("vit_tiny_patch16_224", pretrained=pretrained, num_classes=0)
         return model, 192
