@@ -279,21 +279,42 @@ def validate_epoch(
 
 def save_checkpoint(
     model,
-    optimizer,
-    epoch,
-    metrics,
-    output_dir,
+    optimizer=None,
+    epoch: int = 0,
+    metrics: dict | None = None,
+    output_dir=".",
     filename="best_model.pt",
+    scheduler=None,
+    config: dict | None = None,
+    best_metric: float | None = None,
+    best_threshold: float | None = None,
+    run_name: str | None = None,
+    save_optimizer_state: bool = False,
+    save_scheduler_state: bool = False,
 ):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    config = config or {}
+    metrics = metrics or {}
     checkpoint = {
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
         "metrics": metrics,
+        "best_metric": best_metric,
+        "best_threshold": best_threshold,
+        "config": config,
+        "run_name": run_name or config.get("run_name"),
+        "fusion_type": config.get("fusion_type", "baseline"),
+        "image_encoder_name": config.get("image_encoder_name"),
+        "text_encoder_name": config.get("text_encoder_name"),
     }
+
+    if save_optimizer_state and optimizer is not None:
+        checkpoint["optimizer_state_dict"] = optimizer.state_dict()
+
+    if save_scheduler_state and scheduler is not None:
+        checkpoint["scheduler_state_dict"] = scheduler.state_dict()
 
     path = output_dir / filename
     torch.save(checkpoint, path)

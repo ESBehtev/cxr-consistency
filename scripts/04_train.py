@@ -476,6 +476,27 @@ def build_metrics_row(train_metrics: dict, valid_metrics: dict, step: int) -> di
     return row
 
 
+def metric_from_epoch(
+    train_metrics: dict,
+    valid_metrics: dict,
+    monitor: str,
+) -> float:
+    if monitor.startswith("valid_"):
+        metrics = valid_metrics
+        key = monitor[len("valid_"):]
+    elif monitor.startswith("train_"):
+        metrics = train_metrics
+        key = monitor[len("train_"):]
+    else:
+        metrics = valid_metrics
+        key = monitor
+
+    if key not in metrics:
+        raise KeyError(f"Checkpoint monitor '{monitor}' not found in epoch metrics")
+
+    return float(metrics[key])
+
+
 def detect_collapse(valid_metrics: dict, config: dict) -> tuple[bool, str | None]:
     collapse_config = config.get("collapse_detection", {}) or {}
     min_probs_std = float(collapse_config.get("min_probs_std", 1e-4))
@@ -624,6 +645,20 @@ def main():
     best_threshold = 0.5
     history = init_history()
 
+    checkpoint_monitor = str(config.get("checkpoint_monitor", "valid_best_f1"))
+    checkpoint_mode = str(config.get("checkpoint_mode", "max"))
+    if checkpoint_mode not in {"max", "min"}:
+        raise ValueError(f"Unsupported checkpoint_mode: {checkpoint_mode}")
+    best_checkpoint_metric = -float("inf") if checkpoint_mode == "max" else float("inf")
+    best_checkpoint_epoch = 0
+    best_checkpoint_threshold = 0.5
+    best_checkpoint_metrics = {}
+    save_checkpoints = bool(config.get("save_checkpoints", True))
+    save_best_checkpoint = bool(config.get("save_best_checkpoint", True))
+    save_last_checkpoint = bool(config.get("save_last_checkpoint", False))
+    save_optimizer_state = bool(config.get("save_optimizer_state", False))
+    save_scheduler_state = bool(config.get("save_scheduler_state", False))
+
     early_stopping_config = config.get("early_stopping", {})
     early_stopping_enabled = bool(early_stopping_config.get("enabled", False))
     early_stopping_monitor = str(early_stopping_config.get("monitor", "valid_roc_auc"))
@@ -720,20 +755,60 @@ def main():
                 best_f1 = float(current_f1)
                 best_threshold = float(current_threshold)
 
-                if config.get("save_checkpoints", True):
-                    save_checkpoint(
-                        model=model,
-                        optimizer=optimizer,
-                        epoch=epoch,
-                        metrics=valid_metrics,
-                        output_dir=experiment_dir,
-                        filename="best_model.pt",
-                    )
-
                 if use_mlflow:
                     log_metric("best_valid_f1", float(best_f1), step, model_id)
 
             best_valid_roc_auc = max(best_valid_roc_auc, float(current_roc_auc))
+
+            checkpoint_value = metric_from_epoch(
+                train_metrics=train_metrics,
+                valid_metrics=valid_metrics,
+                monitor=checkpoint_monitor,
+            )
+            if checkpoint_mode == "max":
+                checkpoint_improved = checkpoint_value > best_checkpoint_metric
+            else:
+                checkpoint_improved = checkpoint_value < best_checkpoint_metric
+
+            if checkpoint_improved:
+                best_checkpoint_metric = float(checkpoint_value)
+                best_checkpoint_epoch = step
+                best_checkpoint_threshold = float(current_threshold)
+                best_checkpoint_metrics = dict(valid_metrics)
+
+                if save_checkpoints and save_best_checkpoint:
+                    save_checkpoint(
+                        model=model,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        epoch=step,
+                        metrics=valid_metrics,
+                        output_dir=experiment_dir,
+                        filename="best_model.pt",
+                        config=config,
+                        best_metric=best_checkpoint_metric,
+                        best_threshold=best_checkpoint_threshold,
+                        run_name=config.get("run_name", Path(args.config).stem),
+                        save_optimizer_state=save_optimizer_state,
+                        save_scheduler_state=save_scheduler_state,
+                    )
+
+            if save_checkpoints and save_last_checkpoint:
+                save_checkpoint(
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    epoch=step,
+                    metrics=valid_metrics,
+                    output_dir=experiment_dir,
+                    filename="last_model.pt",
+                    config=config,
+                    best_metric=best_checkpoint_metric,
+                    best_threshold=best_checkpoint_threshold,
+                    run_name=config.get("run_name", Path(args.config).stem),
+                    save_optimizer_state=save_optimizer_state,
+                    save_scheduler_state=save_scheduler_state,
+                )
 
             collapsed, collapse_reason = detect_collapse(valid_metrics, config)
             if collapsed:
@@ -802,10 +877,30 @@ def main():
             "early_stopping_stopped": bool(stopped_early),
             "early_stopping_best_epoch": int(best_monitor_epoch),
             "early_stopping_best_value": float(best_monitor_value) if best_monitor_epoch else None,
+            "checkpoint_monitor": checkpoint_monitor,
+            "checkpoint_mode": checkpoint_mode,
+            "best_epoch": int(best_checkpoint_epoch),
+            "best_metric": float(best_checkpoint_metric) if best_checkpoint_epoch else None,
+            "best_checkpoint_threshold": float(best_checkpoint_threshold),
+            "best_checkpoint_metrics": best_checkpoint_metrics,
+            "best_model_path": str(experiment_dir / "best_model.pt") if save_checkpoints and save_best_checkpoint else None,
+            "last_model_path": str(experiment_dir / "last_model.pt") if save_checkpoints and save_last_checkpoint else None,
         }
 
         if not use_mlflow:
             write_json(experiment_dir / "summary.json", summary)
+            write_json(
+                experiment_dir / "status.json",
+                {
+                    "run_name": summary["run_name"],
+                    "status": summary["status"],
+                    "epochs_completed": epochs_completed,
+                    "runtime_min": summary["runtime_min"],
+                    "best_epoch": summary["best_epoch"],
+                    "best_metric": summary["best_metric"],
+                    "checkpoint_monitor": checkpoint_monitor,
+                },
+            )
         else:
             mlflow.log_metric("early_stopping_stopped", float(stopped_early), step=epochs_completed, synchronous=True)
             mlflow.set_tag("early_stopping_stopped", str(stopped_early))
