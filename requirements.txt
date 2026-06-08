@@ -15,5 +15,7 @@ sentencepiece
 accelerate
 wandb
 kaggle
+kagglehub
 timm
 mlflow
+streamlit

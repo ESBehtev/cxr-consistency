@@ -22,7 +22,7 @@ bash git clone <REPO_URL> cxr-consistency cd cxr-consistency
 
 Создайте и активируйте виртуальное окружение:
 
-bash python3 -m venv .venv source .venv/bin/activate  python -m pip install --upgrade pip setuptools wheel  pip install -r requirements.txt pip install -e . 
+<!-- bash python3 -m venv .venv source .venv/bin/activate  python -m pip install --upgrade pip setuptools wheel  pip install -r requirements.txt pip install -e .  -->
 
 После установки рекомендуется проверить доступность CUDA:
 
